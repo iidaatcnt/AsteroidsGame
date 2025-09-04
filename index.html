@@ -27,10 +27,29 @@
             font-size: 20px;
             margin-bottom: 10px;
         }
+        .demo-mode {
+            position: absolute;
+            top: 60px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #ff0;
+            font-size: 24px;
+            font-weight: bold;
+            animation: blink 1s infinite;
+        }
+        
+        @keyframes blink {
+            0% { opacity: 1; }
+            50% { opacity: 0.3; }
+            100% { opacity: 1; }
+        }
     </style>
 </head>
 <body>
     <div class="score">スコア: <span id="score">0</span> | ライフ: <span id="lives">3</span></div>
+    <div id="demoText" class="demo-mode" style="display: none;">
+        🎮 DEMO MODE - 何かキーを押してプレイ開始 🎮
+    </div>
     <canvas id="gameCanvas" width="800" height="600"></canvas>
     <div class="controls">
         <p>操作方法:</p>
@@ -50,6 +69,10 @@
         let keys = {};
         let invulnerable = 0; // 無敵時間
         let gameOver = false;
+        let isDemo = false;
+        let lastUserInput = Date.now();
+        let demoActionTimer = 0;
+        let demoTarget = null;
 
         // 宇宙船
         const ship = {
@@ -88,6 +111,14 @@
         // キーボードイベント
         document.addEventListener('keydown', (e) => {
             keys[e.code] = true;
+            
+            // ユーザー入力を記録
+            lastUserInput = Date.now();
+            
+            // デモモード中の場合は終了
+            if (isDemo) {
+                stopDemo();
+            }
         });
 
         document.addEventListener('keyup', (e) => {
@@ -103,6 +134,18 @@
             ctx.save();
             ctx.translate(ship.x, ship.y);
             ctx.rotate(ship.angle);
+            
+            // デモモード中は光る輪郭を追加
+            if (isDemo) {
+                ctx.strokeStyle = '#ff0';
+                ctx.lineWidth = 3;
+                ctx.globalAlpha = 0.5 + Math.sin(Date.now() / 200) * 0.3;
+                ctx.beginPath();
+                ctx.arc(0, 0, ship.size * 2, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.globalAlpha = 1;
+            }
+            
             ctx.strokeStyle = '#fff';
             ctx.lineWidth = 2;
             ctx.beginPath();
@@ -214,6 +257,11 @@
             for (let i = 0; i < 8; i++) {
                 asteroids.push(createAsteroid());
             }
+            
+            // デモモードでない場合は入力時間を更新
+            if (!isDemo) {
+                lastUserInput = Date.now();
+            }
         }
 
         // ゲームオーバー画面を描画
@@ -233,15 +281,154 @@
             ctx.fillText('スペースキーを押して再スタート', canvas.width / 2, canvas.height / 2 + 60);
         }
 
+        // デモモードのAI制御
+        function updateDemoAI() {
+            demoActionTimer++;
+            
+            // 30フレームごとに行動を考える
+            if (demoActionTimer < 30) return;
+            demoActionTimer = 0;
+            
+            // 最も近い小惑星をターゲットにする
+            let nearestAsteroid = null;
+            let nearestDistance = Infinity;
+            
+            asteroids.forEach(asteroid => {
+                const dx = asteroid.x - ship.x;
+                const dy = asteroid.y - ship.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestAsteroid = asteroid;
+                }
+            });
+            
+            if (nearestAsteroid) {
+                // ターゲットの位置を予測
+                const predictTime = 20;
+                const targetX = nearestAsteroid.x + nearestAsteroid.vx * predictTime;
+                const targetY = nearestAsteroid.y + nearestAsteroid.vy * predictTime;
+                
+                // 回避が必要か判断
+                if (nearestDistance < 100) {
+                    // 近すぎる場合は回避
+                    const avoidAngle = Math.atan2(
+                        ship.y - nearestAsteroid.y,
+                        ship.x - nearestAsteroid.x
+                    );
+                    
+                    // 回避方向に回転
+                    const angleDiff = normalizeAngle(avoidAngle - ship.angle);
+                    if (angleDiff > 0.1) {
+                        keys['ArrowLeft'] = false;
+                        keys['ArrowRight'] = true;
+                    } else if (angleDiff < -0.1) {
+                        keys['ArrowLeft'] = true;
+                        keys['ArrowRight'] = false;
+                    } else {
+                        keys['ArrowLeft'] = false;
+                        keys['ArrowRight'] = false;
+                    }
+                    
+                    // 推進して回避
+                    keys['ArrowUp'] = true;
+                    keys['Space'] = false;
+                } else {
+                    // 攻撃位置へ移動
+                    const targetAngle = Math.atan2(
+                        targetY - ship.y,
+                        targetX - ship.x
+                    );
+                    
+                    // ターゲットに向けて回転
+                    const angleDiff = normalizeAngle(targetAngle - ship.angle);
+                    
+                    if (Math.abs(angleDiff) > 0.2) {
+                        if (angleDiff > 0) {
+                            keys['ArrowLeft'] = false;
+                            keys['ArrowRight'] = true;
+                        } else {
+                            keys['ArrowLeft'] = true;
+                            keys['ArrowRight'] = false;
+                        }
+                        keys['Space'] = false;
+                    } else {
+                        // 狙いが合ったら射撃
+                        keys['ArrowLeft'] = false;
+                        keys['ArrowRight'] = false;
+                        keys['Space'] = nearestDistance < 300;
+                    }
+                    
+                    // 速度調整
+                    const speed = Math.sqrt(ship.vx * ship.vx + ship.vy * ship.vy);
+                    keys['ArrowUp'] = speed < 3 || nearestDistance > 200;
+                }
+            } else {
+                // 小惑星がない場合は待機
+                keys['ArrowLeft'] = false;
+                keys['ArrowRight'] = false;
+                keys['ArrowUp'] = false;
+                keys['Space'] = false;
+            }
+        }
+        
+        // 角度を-PIからPIの範囲に正規化
+        function normalizeAngle(angle) {
+            while (angle > Math.PI) angle -= Math.PI * 2;
+            while (angle < -Math.PI) angle += Math.PI * 2;
+            return angle;
+        }
+        
+        // デモモードのチェック
+        function checkDemoMode() {
+            if (gameOver || isDemo) return;
+            
+            // 5秒間操作がなければデモモード開始
+            if (Date.now() - lastUserInput > 5000) {
+                startDemo();
+            }
+        }
+        
+        // デモモード開始
+        function startDemo() {
+            isDemo = true;
+            demoActionTimer = 0;
+            resetGame();
+            document.getElementById('demoText').style.display = 'block';
+        }
+        
+        // デモモード終了
+        function stopDemo() {
+            if (isDemo) {
+                isDemo = false;
+                document.getElementById('demoText').style.display = 'none';
+                resetGame();
+                // 全てのキーをリセット
+                Object.keys(keys).forEach(key => keys[key] = false);
+            }
+        }
+        
         // ゲームループ
         function gameLoop() {
             // 背景をクリア
             ctx.fillStyle = '#000';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+            // デモモードのチェック
+            checkDemoMode();
+            
             // ゲームオーバー時の処理
             if (gameOver) {
-                drawGameOver();
+                if (isDemo) {
+                    // デモモード中は自動リスタート
+                    setTimeout(() => {
+                        resetGame();
+                        isDemo = true;
+                    }, 2000);
+                } else {
+                    drawGameOver();
+                }
                 
                 // スペースキーで再スタート
                 if (keys['Space']) {
@@ -255,6 +442,11 @@
                 
                 requestAnimationFrame(gameLoop);
                 return;
+            }
+            
+            // デモモード中はAIが操作
+            if (isDemo) {
+                updateDemoAI();
             }
 
             // 無敵時間を減らす
