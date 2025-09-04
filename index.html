@@ -285,13 +285,15 @@
         function updateDemoAI() {
             demoActionTimer++;
             
-            // 30フレームごとに行動を考える
-            if (demoActionTimer < 30) return;
+            // 10フレームごとに行動を更新（よりスムーズな動き）
+            if (demoActionTimer < 10) return;
             demoActionTimer = 0;
             
             // 最も近い小惑星をターゲットにする
             let nearestAsteroid = null;
             let nearestDistance = Infinity;
+            let bestTarget = null;
+            let bestTargetScore = -Infinity;
             
             asteroids.forEach(asteroid => {
                 const dx = asteroid.x - ship.x;
@@ -302,17 +304,28 @@
                     nearestDistance = distance;
                     nearestAsteroid = asteroid;
                 }
+                
+                // 狙いやすいターゲットを選ぶ（距離と角度を考慮）
+                const angle = Math.atan2(dy, dx);
+                const angleDiff = Math.abs(normalizeAngle(angle - ship.angle));
+                const score = 1000 / distance - angleDiff * 100;
+                
+                if (score > bestTargetScore && distance < 400) {
+                    bestTargetScore = score;
+                    bestTarget = asteroid;
+                }
             });
             
+            // デフォルトで全てのキーをオフ
+            keys['ArrowLeft'] = false;
+            keys['ArrowRight'] = false;
+            keys['ArrowUp'] = false;
+            keys['Space'] = false;
+            
             if (nearestAsteroid) {
-                // ターゲットの位置を予測
-                const predictTime = 20;
-                const targetX = nearestAsteroid.x + nearestAsteroid.vx * predictTime;
-                const targetY = nearestAsteroid.y + nearestAsteroid.vy * predictTime;
-                
-                // 回避が必要か判断
-                if (nearestDistance < 100) {
-                    // 近すぎる場合は回避
+                // 危険な距離の小惑星がある場合
+                if (nearestDistance < 80) {
+                    // 緊急回避が必要
                     const avoidAngle = Math.atan2(
                         ship.y - nearestAsteroid.y,
                         ship.x - nearestAsteroid.x
@@ -320,56 +333,103 @@
                     
                     // 回避方向に回転
                     const angleDiff = normalizeAngle(avoidAngle - ship.angle);
-                    if (angleDiff > 0.1) {
-                        keys['ArrowLeft'] = false;
-                        keys['ArrowRight'] = true;
-                    } else if (angleDiff < -0.1) {
-                        keys['ArrowLeft'] = true;
-                        keys['ArrowRight'] = false;
-                    } else {
-                        keys['ArrowLeft'] = false;
-                        keys['ArrowRight'] = false;
-                    }
-                    
-                    // 推進して回避
-                    keys['ArrowUp'] = true;
-                    keys['Space'] = false;
-                } else {
-                    // 攻撃位置へ移動
-                    const targetAngle = Math.atan2(
-                        targetY - ship.y,
-                        targetX - ship.x
-                    );
-                    
-                    // ターゲットに向けて回転
-                    const angleDiff = normalizeAngle(targetAngle - ship.angle);
-                    
-                    if (Math.abs(angleDiff) > 0.2) {
+                    if (Math.abs(angleDiff) > 0.3) {
                         if (angleDiff > 0) {
-                            keys['ArrowLeft'] = false;
                             keys['ArrowRight'] = true;
                         } else {
                             keys['ArrowLeft'] = true;
-                            keys['ArrowRight'] = false;
                         }
-                        keys['Space'] = false;
-                    } else {
-                        // 狙いが合ったら射撃
-                        keys['ArrowLeft'] = false;
-                        keys['ArrowRight'] = false;
-                        keys['Space'] = nearestDistance < 300;
                     }
                     
-                    // 速度調整
-                    const speed = Math.sqrt(ship.vx * ship.vx + ship.vy * ship.vy);
-                    keys['ArrowUp'] = speed < 3 || nearestDistance > 200;
+                    // 短時間だけ推進して回避
+                    if (Math.abs(angleDiff) < Math.PI / 4) {
+                        keys['ArrowUp'] = true;
+                    }
+                } else if (bestTarget) {
+                    // 狙いやすいターゲットに向けて回転して射撃
+                    const targetX = bestTarget.x;
+                    const targetY = bestTarget.y;
+                    
+                    // 少し先の位置を予測
+                    const predictTime = Math.min(nearestDistance / 8, 30);
+                    const predictedX = targetX + bestTarget.vx * predictTime;
+                    const predictedY = targetY + bestTarget.vy * predictTime;
+                    
+                    const targetAngle = Math.atan2(
+                        predictedY - ship.y,
+                        predictedX - ship.x
+                    );
+                    
+                    const angleDiff = normalizeAngle(targetAngle - ship.angle);
+                    
+                    // 精密な回転制御
+                    if (Math.abs(angleDiff) > 0.1) {
+                        if (Math.abs(angleDiff) > 0.5) {
+                            // 大きく向きが違う場合は速く回転
+                            if (angleDiff > 0) {
+                                keys['ArrowRight'] = true;
+                            } else {
+                                keys['ArrowLeft'] = true;
+                            }
+                        } else {
+                            // 微調整（1フレームおきに回転）
+                            if (Date.now() % 100 < 50) {
+                                if (angleDiff > 0) {
+                                    keys['ArrowRight'] = true;
+                                } else {
+                                    keys['ArrowLeft'] = true;
+                                }
+                            }
+                        }
+                    } else {
+                        // 狙いが定まったら射撃
+                        const distance = Math.sqrt(
+                            Math.pow(predictedX - ship.x, 2) + 
+                            Math.pow(predictedY - ship.y, 2)
+                        );
+                        
+                        // 距離が適切なら射撃
+                        if (distance < 350 && distance > 50) {
+                            keys['Space'] = true;
+                        }
+                    }
+                    
+                    // 速度制御（ほとんど移動しない）
+                    const currentSpeed = Math.sqrt(ship.vx * ship.vx + ship.vy * ship.vy);
+                    
+                    // 速度が速すぎる場合のみブレーキ（逆方向に推進）
+                    if (currentSpeed > 2) {
+                        const velocityAngle = Math.atan2(ship.vy, ship.vx);
+                        const reverseAngle = velocityAngle + Math.PI;
+                        const brakeDiff = normalizeAngle(reverseAngle - ship.angle);
+                        
+                        if (Math.abs(brakeDiff) < Math.PI / 4) {
+                            // ブレーキをかける方向を向いている場合のみ推進
+                            if (Date.now() % 100 < 30) { // 短時間だけ
+                                keys['ArrowUp'] = true;
+                            }
+                        }
+                    }
+                    
+                    // 画面端に近い場合は中央へ移動
+                    const edgeDistance = 100;
+                    if (ship.x < edgeDistance || ship.x > canvas.width - edgeDistance ||
+                        ship.y < edgeDistance || ship.y > canvas.height - edgeDistance) {
+                        
+                        const centerAngle = Math.atan2(
+                            canvas.height / 2 - ship.y,
+                            canvas.width / 2 - ship.x
+                        );
+                        const centerDiff = normalizeAngle(centerAngle - ship.angle);
+                        
+                        if (Math.abs(centerDiff) < Math.PI / 6) {
+                            // 中央を向いている時だけ少し推進
+                            if (Date.now() % 100 < 20) {
+                                keys['ArrowUp'] = true;
+                            }
+                        }
+                    }
                 }
-            } else {
-                // 小惑星がない場合は待機
-                keys['ArrowLeft'] = false;
-                keys['ArrowRight'] = false;
-                keys['ArrowUp'] = false;
-                keys['Space'] = false;
             }
         }
         
